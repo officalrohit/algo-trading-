@@ -1,0 +1,59 @@
+{
+    "mode": "live",
+    "active_symbol": "XAUUSD",
+    "active_timeframe": "M1",
+    "scan_interval_seconds": 1,
+    "mt5": {
+        "login": 5056943958,
+        "password": "Hd*s8fRb",
+        "server": "MetaQuotes-Demo",
+        "path": null,
+        "portable": false,
+        "timeout": 60000
+    },
+    "risk": {
+        "max_risk_pct": 1.5,
+        "fixed_lot": 0.01,
+        "use_dynamic_lot": false,
+        "max_open_positions": 3,
+        "max_daily_loss": 4000.0,
+        "max_spread_points": 60,
+        "slippage_points": 10,
+        "use_trailing_stop": false,
+        "trailing_stop_pips": 20.0
+    },
+    "strategy": {
+        "name": "Price Cross EMA (44 EMA)",
+        "symbol": "EURUSD",
+        "timeframe": "M5",
+        "fast_period": 44,
+        "slow_period": 44,
+        "trend_filter_period": 200,
+        "rsi_period": 14,
+        "rsi_oversold": 30.0,
+        "rsi_overbought": 70.0,
+        "bb_period": 20,
+        "bb_std": 2.0,
+        "macd_fast": 12,
+        "macd_slow": 26,
+        "macd_signal": 9,
+        "donchian_period": 20,
+        "sl_pips": 100.0,
+        "tp_pips": 200.0,
+        "use_atr_stops": false,
+        "atr_sl_mult": 1.5,
+        "atr_tp_mult": 2.5,
+        "magic_number": 777123
+    },
+    "tracked_symbols": [
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY",
+        "AUDUSD",
+        "USDCAD",
+        "USDCHF",
+        "NZDUSD",
+        "XAUUSD",
+        "BTCUSD"
+    ]
+}
