@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import pandas as pd
@@ -57,6 +58,8 @@ class MT5Client(TradingClient):
         self.timeout = timeout
         self.portable = portable
         self._connected = False
+        self._reconnecting = False
+        self._last_reconnect_time = 0.0
 
     def connect(self) -> bool:
         if not MT5_AVAILABLE:
@@ -91,9 +94,36 @@ class MT5Client(TradingClient):
                 return False
 
         self._connected = True
-        acc = self.get_account_info()
-        logger.info(f"Connected to MT5 successfully. Account: {acc.login if acc else 'Unknown'}")
+        info = mt5.account_info()
+        logger.info(f"Connected to MT5 successfully. Account: {info.login if info else 'Unknown'}")
         return True
+
+    def _ensure_connected(self) -> bool:
+        if not MT5_AVAILABLE:
+            return False
+        if self._reconnecting:
+            return self._connected
+
+        if self._connected:
+            try:
+                term = mt5.terminal_info()
+                if term is not None and term.connected:
+                    return True
+            except Exception:
+                pass
+
+        now = time.time()
+        # Debounce reconnection attempts so we don't spam if terminal is closed
+        if (now - self._last_reconnect_time) < 3.0:
+            return self._connected
+
+        self._last_reconnect_time = now
+        try:
+            self._reconnecting = True
+            logger.info("MT5 connection lost or uninitialized. Auto-reconnecting...")
+            return self.connect()
+        finally:
+            self._reconnecting = False
 
     def disconnect(self) -> None:
         if MT5_AVAILABLE and self._connected:
@@ -102,14 +132,10 @@ class MT5Client(TradingClient):
             logger.info("MT5 disconnected.")
 
     def is_connected(self) -> bool:
-        if not MT5_AVAILABLE or not self._connected:
-            return False
-        # Verify terminal is still responsive
-        terminal_info = mt5.terminal_info()
-        return terminal_info is not None and terminal_info.connected
+        return self._ensure_connected()
 
     def get_account_info(self) -> Optional[AccountInfo]:
-        if not self._connected:
+        if not self._ensure_connected():
             return None
         info = mt5.account_info()
         if info is None:
@@ -127,7 +153,7 @@ class MT5Client(TradingClient):
         )
 
     def get_symbol_info(self, symbol: str) -> Optional[SymbolInfo]:
-        if not self._connected:
+        if not self._ensure_connected():
             return None
 
         # Ensure symbol is visible in Market Watch
@@ -146,10 +172,11 @@ class MT5Client(TradingClient):
             min_lot=info.volume_min,
             max_lot=info.volume_max,
             lot_step=info.volume_step,
+            contract_size=float(getattr(info, "trade_contract_size", 100000.0) or 100000.0),
         )
 
     def get_tick(self, symbol: str) -> Optional[TickData]:
-        if not self._connected:
+        if not self._ensure_connected():
             return None
         # Ensure symbol is active in Market Watch
         mt5.symbol_select(symbol, True)
@@ -171,7 +198,7 @@ class MT5Client(TradingClient):
         )
 
     def get_rates(self, symbol: str, timeframe: str, count: int = 300) -> pd.DataFrame:
-        if not self._connected:
+        if not self._ensure_connected():
             return pd.DataFrame()
 
         mt5.symbol_select(symbol, True)
@@ -208,7 +235,7 @@ class MT5Client(TradingClient):
         magic: int = 0,
         comment: str = "",
     ) -> OrderResult:
-        if not self._connected:
+        if not self._ensure_connected():
             return OrderResult(success=False, retcode=-1, error_message="Not connected to MT5")
 
         sym_info = self.get_symbol_info(symbol)
@@ -264,8 +291,8 @@ class MT5Client(TradingClient):
             error_message="" if success else f"Return code {result.retcode}: {result.comment}",
         )
 
-    def close_position(self, ticket: int) -> OrderResult:
-        if not self._connected:
+    def close_position(self, ticket: int, comment: str = "Manual Close") -> OrderResult:
+        if not self._ensure_connected():
             return OrderResult(success=False, retcode=-1, error_message="Not connected")
 
         positions = mt5.positions_get(ticket=ticket)
@@ -291,7 +318,7 @@ class MT5Client(TradingClient):
             "price": price,
             "deviation": 20,
             "magic": pos.magic,
-            "comment": "Close by Bot",
+            "comment": comment[:31],
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": self._determine_filling_type(pos.symbol),
         }
@@ -314,7 +341,7 @@ class MT5Client(TradingClient):
         )
 
     def modify_position(self, ticket: int, sl: Optional[float] = None, tp: Optional[float] = None) -> OrderResult:
-        if not self._connected:
+        if not self._ensure_connected():
             return OrderResult(success=False, retcode=-1, error_message="Not connected")
 
         positions = mt5.positions_get(ticket=ticket)
@@ -351,7 +378,7 @@ class MT5Client(TradingClient):
         )
 
     def get_open_positions(self, symbol: Optional[str] = None) -> List[Position]:
-        if not self._connected:
+        if not self._ensure_connected():
             return []
 
         raw_positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
@@ -382,31 +409,84 @@ class MT5Client(TradingClient):
         positions = self.get_open_positions()
         results = []
         for pos in positions:
-            res = self.close_position(pos.ticket)
+            res = self.close_position(pos.ticket, comment="Kill Switch")
             results.append(res)
         return results
 
     def get_history_deals(self, days: int = 7) -> List[dict]:
-        if not self._connected:
+        if not self._ensure_connected():
             return []
         now = datetime.now(timezone.utc)
         from_time = now - timedelta(days=days)
         deals = mt5.history_deals_get(from_time, now)
         if deals is None:
             return []
-        out = []
+        orders = mt5.history_orders_get(from_time, now)
+        orders_by_pos = {}
+        if orders:
+            for o in orders:
+                pid = o.position_id or o.ticket
+                if pid not in orders_by_pos:
+                    orders_by_pos[pid] = []
+                orders_by_pos[pid].append(o)
+
+        pos_deals = {}
         for d in deals:
+            # Skip non-trade deals (such as initial deposit or account balance adjustments)
+            if d.entry not in (0, 1, 2, 3) or not d.symbol:
+                continue
+            pid = d.position_id
+            if not pid:
+                continue
+            if pid not in pos_deals:
+                pos_deals[pid] = []
+            pos_deals[pid].append(d)
+
+        out = []
+        for pid, dlist in pos_deals.items():
+            in_deals = [d for d in dlist if d.entry == 0]
+            out_deals = [d for d in dlist if d.entry in (1, 2, 3)]
+            if not out_deals:
+                continue  # Position is still open or has no exit yet
+
+            first_in = in_deals[0] if in_deals else dlist[0]
+            last_out = out_deals[-1]
+            total_profit = sum(d.profit for d in dlist)
+            total_commission = sum(d.commission for d in dlist)
+            total_swap = sum(d.swap for d in dlist)
+
+            pos_orders = orders_by_pos.get(pid, [])
+            in_orders = [o for o in pos_orders if o.type in (0, 1) and (o.sl > 0 or o.tp > 0)]
+            sl_val = in_orders[0].sl if in_orders else 0.0
+            tp_val = in_orders[0].tp if in_orders else 0.0
+
+            # Determine human-friendly exit reason
+            reason_str = "Closed"
+            if last_out.reason == 4 or "[sl" in (last_out.comment or "").lower():
+                reason_str = "Stop Loss Hit"
+            elif last_out.reason == 5 or "[tp" in (last_out.comment or "").lower():
+                reason_str = "Take Profit Hit"
+            elif last_out.reason == 6 or "so" in (last_out.comment or "").lower():
+                reason_str = "Stop Out"
+            elif last_out.comment:
+                reason_str = last_out.comment
+
             out.append({
-                "ticket": d.ticket,
-                "order": d.order,
-                "time": datetime.fromtimestamp(d.time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "symbol": d.symbol,
-                "type": "BUY" if d.type == 0 else "SELL",
-                "volume": d.volume,
-                "price": d.price,
-                "profit": d.profit,
-                "commission": d.commission,
-                "swap": d.swap,
-                "comment": d.comment,
+                "ticket": pid,
+                "symbol": first_in.symbol,
+                "type": "BUY" if first_in.type == 0 else "SELL",
+                "volume": first_in.volume,
+                "open_time": datetime.fromtimestamp(first_in.time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "open_price": first_in.price,
+                "close_time": datetime.fromtimestamp(last_out.time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "close_price": last_out.price,
+                "sl": sl_val,
+                "tp": tp_val,
+                "profit": round(total_profit, 2),
+                "commission": round(total_commission, 2),
+                "swap": round(total_swap, 2),
+                "exit_reason": reason_str,
             })
+
+        out.sort(key=lambda x: x["close_time"], reverse=True)
         return out

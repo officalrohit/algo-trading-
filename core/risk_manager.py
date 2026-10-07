@@ -142,8 +142,13 @@ class RiskManager:
         if not self.config.use_trailing_stop:
             return None
 
+        sym = symbol_info.name.upper()
+        is_dollar_asset = "XAU" in sym or "XAG" in sym or "GOLD" in sym or "BTC" in sym
+        if is_dollar_asset and hasattr(self.config, "trailing_stop_dollars") and float(getattr(self.config, "trailing_stop_dollars", 0)) > 0:
+            trailing_dist = float(self.config.trailing_stop_dollars)
+        else:
+            trailing_dist = symbol_info.pip_to_price(self.config.trailing_stop_pips)
         point = symbol_info.point
-        trailing_dist = symbol_info.pip_to_price(self.config.trailing_stop_pips)
         digits = symbol_info.digits
 
         if position.type == "BUY":

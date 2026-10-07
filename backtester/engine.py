@@ -40,12 +40,16 @@ class BacktestEngine:
         initial_capital: float = 10000.0,
         risk_pct: float = 1.5,
         spread_pips: float = 1.5,
+        fixed_lot: Optional[float] = None,
+        exit_on_opposite: bool = True,
     ):
         self.strategy = strategy
         self.spec = symbol_info
         self.initial_capital = initial_capital
         self.risk_pct = risk_pct
         self.spread_points = spread_pips * 10
+        self.fixed_lot = fixed_lot
+        self.exit_on_opposite = exit_on_opposite
 
     def run(self, df: pd.DataFrame) -> BacktestResult:
         if df.empty or len(df) < 30:
@@ -66,19 +70,34 @@ class BacktestEngine:
         point = self.spec.point
         spread_cost = self.spread_points * point
 
-        contract_size = 100000.0
-        if "XAU" in self.spec.name:
-            contract_size = 100.0
-        elif "BTC" in self.spec.name:
-            contract_size = 1.0
+        contract_size = (
+            self.spec.get_contract_size()
+            if hasattr(self.spec, "get_contract_size")
+            else (
+                100.0
+                if ("XAU" in self.spec.name.upper() or "GOLD" in self.spec.name.upper())
+                else (1.0 if "BTC" in self.spec.name.upper() else 100000.0)
+            )
+        )
 
-        warmup = 30
+        min_required = max(30, self.strategy.params.get("ema_period", 30) + 10, self.strategy.params.get("slow_period", 30) + 10)
+        warmup = min(len(df) // 3, min_required)
         for i in range(warmup, len(df)):
             current_bar = df.iloc[i]
             bar_time = df.index[i]
             high = current_bar["high"]
             low = current_bar["low"]
             close = current_bar["close"]
+
+            hist_slice = df.iloc[: i + 1]
+            mock_tick = TickData(
+                symbol=self.spec.name,
+                bid=close,
+                ask=close + spread_cost,
+                last=close,
+                spread_points=int(self.spread_points),
+                time=bar_time.to_pydatetime() if hasattr(bar_time, "to_pydatetime") else bar_time,
+            )
 
             # 1. Manage currently open position against this bar's High and Low
             if open_trade is not None:
@@ -97,8 +116,6 @@ class BacktestEngine:
                         exit_price = open_trade.tp
                         reason = "Take Profit"
                         trade_closed = True
-                    else:
-                        equity = balance + (close - open_trade.entry_price) * open_trade.volume * contract_size
 
                 elif open_trade.direction == "SELL":
                     # Check SL
@@ -111,8 +128,18 @@ class BacktestEngine:
                         exit_price = open_trade.tp
                         reason = "Take Profit"
                         trade_closed = True
-                    else:
-                        equity = balance + (open_trade.entry_price - close) * open_trade.volume * contract_size
+
+                # Check for opposite signal exit if SL/TP not hit
+                if not trade_closed and self.exit_on_opposite and i < len(df) - 1:
+                    bar_sig = self.strategy.generate_signal(hist_slice, mock_tick, self.spec)
+                    if open_trade.direction == "BUY" and bar_sig.signal_type == "SELL":
+                        exit_price = mock_tick.bid
+                        reason = "Opposite Signal (SELL)"
+                        trade_closed = True
+                    elif open_trade.direction == "SELL" and bar_sig.signal_type == "BUY":
+                        exit_price = mock_tick.ask
+                        reason = "Opposite Signal (BUY)"
+                        trade_closed = True
 
                 if trade_closed:
                     if open_trade.direction == "BUY":
@@ -128,26 +155,34 @@ class BacktestEngine:
                     open_trade.exit_reason = reason
                     closed_trades.append(open_trade)
                     open_trade = None
+                else:
+                    if open_trade.direction == "BUY":
+                        equity = balance + (close - open_trade.entry_price) * open_trade.volume * contract_size
+                    else:
+                        equity = balance + (open_trade.entry_price - close) * open_trade.volume * contract_size
 
             # 2. Check for new signals if no position currently open
             if open_trade is None and i < len(df) - 1:
-                hist_slice = df.iloc[: i + 1]
-                mock_tick = TickData(
-                    symbol=self.spec.name,
-                    bid=close,
-                    ask=close + spread_cost,
-                    last=close,
-                    spread_points=int(self.spread_points),
-                    time=bar_time.to_pydatetime(),
-                )
                 sig = self.strategy.generate_signal(hist_slice, mock_tick, self.spec)
 
                 if sig.signal_type in ("BUY", "SELL"):
-                    # Calculate dynamic lot size
-                    risk_amount = equity * (self.risk_pct / 100.0)
-                    sl_dist = sig.sl_points * point if sig.sl_points > 0 else self.spec.pip_to_price(25.0)
-                    point_val = point * contract_size
-                    volume = max(self.spec.min_lot, min(round(risk_amount / (sl_dist * point_val), 2), self.spec.max_lot))
+                    # Calculate lot size
+                    step = self.spec.lot_step if (self.spec and self.spec.lot_step > 0) else 0.01
+                    min_l = self.spec.min_lot if (self.spec and self.spec.min_lot > 0) else 0.01
+                    max_l = self.spec.max_lot if (self.spec and self.spec.max_lot > 0) else 100.0
+
+                    if self.fixed_lot is not None and self.fixed_lot > 0:
+                        vol = round(round(self.fixed_lot / step) * step, 2)
+                        volume = max(min_l, min(vol, max_l))
+                    else:
+                        risk_amount = max(0.0, equity) * (self.risk_pct / 100.0)
+                        sl_dist = sig.sl_points * point if sig.sl_points > 0 else self.spec.pip_to_price(25.0)
+                        point_val = point * contract_size
+                        if sl_dist * point_val > 0:
+                            calc_vol = round(risk_amount / (sl_dist * point_val), 2)
+                        else:
+                            calc_vol = min_l
+                        volume = max(min_l, min(calc_vol, max_l))
 
                     entry_p = mock_tick.ask if sig.signal_type == "BUY" else mock_tick.bid
                     open_trade = BacktestTrade(

@@ -36,7 +36,39 @@ class SymbolInfo:
     spread: int
     min_lot: float
     max_lot: float
-    lot_step: float
+    lot_step: float = 0.01
+    contract_size: float = 100000.0
+
+    def __post_init__(self):
+        sym = self.name.upper()
+        if ("XAU" in sym or "GOLD" in sym or "XAG" in sym) and self.contract_size == 100000.0:
+            self.contract_size = 100.0
+        elif "BTC" in sym and self.contract_size == 100000.0:
+            self.contract_size = 1.0
+
+    def get_contract_size(self) -> float:
+        """Returns standard contract size for instrument (e.g. 100 for Gold, 1 for BTC, 100,000 for Forex)."""
+        sym = self.name.upper()
+        if hasattr(self, "contract_size") and self.contract_size not in (0, None, 100000.0):
+            return float(self.contract_size)
+        if "XAU" in sym or "GOLD" in sym or "XAG" in sym:
+            return 100.0
+        elif "BTC" in sym:
+            return 1.0
+        else:
+            return 100000.0
+
+    def cash_to_price_dist(self, cash_dollars: float, volume: float) -> float:
+        """Converts desired cash profit/loss in dollars to price distance based on lot size and contract size.
+        Formula: price_dist = cash_dollars / (volume * contract_size)
+        Example: 0.05 lots on Gold (100 contract size) -> $10.00 SL / (0.05 * 100) = 2.00 price distance.
+        """
+        vol = max(0.0001, float(volume) if volume else 0.01)
+        c_size = self.get_contract_size()
+        multiplier = vol * c_size
+        if multiplier <= 0:
+            return float(cash_dollars)
+        return float(cash_dollars) / multiplier
 
     def pip_to_price(self, pips: float) -> float:
         """Converts pips to price distance based on symbol characteristics:
@@ -134,7 +166,7 @@ class TradingClient(ABC):
         pass
 
     @abstractmethod
-    def close_position(self, ticket: int) -> OrderResult:
+    def close_position(self, ticket: int, comment: str = "Manual Close") -> OrderResult:
         """Close an open position by ticket."""
         pass
 

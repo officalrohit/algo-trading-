@@ -26,6 +26,7 @@ class RiskConfig(BaseModel):
     max_spread_points: int = Field(default=35, ge=1, description="Max allowed spread in points before blocking trades")
     slippage_points: int = Field(default=10, ge=0, description="Allowed slippage in points")
     use_trailing_stop: bool = Field(default=True, description="Enable dynamic trailing stop loss")
+    trailing_stop_dollars: float = Field(default=10.0, ge=0.01, description="Trailing stop distance in dollars")
     trailing_stop_pips: float = Field(default=20.0, ge=5.0, description="Trailing stop distance in pips")
 
 
@@ -34,9 +35,11 @@ class StrategyConfig(BaseModel):
     name: str = "EMA Crossover"
     symbol: str = "EURUSD"
     timeframe: str = "M5"  # M1, M5, M15, M30, H1, H4, D1
+    ema_period: int = 44
     fast_period: int = 9
     slow_period: int = 21
     trend_filter_period: int = 200
+    use_trend_filter: bool = False
     rsi_period: int = 14
     rsi_oversold: float = 30.0
     rsi_overbought: float = 70.0
@@ -46,8 +49,10 @@ class StrategyConfig(BaseModel):
     macd_slow: int = 26
     macd_signal: int = 9
     donchian_period: int = 20
-    sl_pips: float = 25.0
-    tp_pips: float = 50.0
+    sl_dollars: float = 10.0
+    tp_dollars: float = 20.0
+    sl_pips: float = 1000.0
+    tp_pips: float = 2000.0
     use_atr_stops: bool = False
     atr_sl_mult: float = 1.5
     atr_tp_mult: float = 2.5

@@ -15,18 +15,26 @@ class EMACrossoverStrategy(BaseStrategy):
             "atr_period": 14,
             "atr_sl_mult": 1.5,
             "atr_tp_mult": 2.5,
-            "sl_pips": 25.0,
-            "tp_pips": 50.0,
-            "fixed_sl_pips": 25.0,
-            "fixed_tp_pips": 50.0,
+            "sl_dollars": 10.0,
+            "tp_dollars": 20.0,
+            "sl_pips": 1000.0,
+            "tp_pips": 2000.0,
+            "fixed_sl_pips": 1000.0,
+            "fixed_tp_pips": 2000.0,
         }
         if params:
             default_params.update(params)
             if "sl_pips" in params:
                 default_params["fixed_sl_pips"] = params["sl_pips"]
+                if "sl_dollars" not in params:
+                    default_params["sl_dollars"] = params["sl_pips"] / 100.0
             if "tp_pips" in params:
                 default_params["fixed_tp_pips"] = params["tp_pips"]
-        super().__init__("EMA Crossover", default_params)
+                if "tp_dollars" not in params:
+                    default_params["tp_dollars"] = params["tp_pips"] / 100.0
+        fast = int(default_params.get("fast_period", 9))
+        slow = int(default_params.get("slow_period", 21))
+        super().__init__(f"EMA Crossover ({fast}/{slow} EMA)", default_params)
 
     def generate_signal(self, df: pd.DataFrame, tick: TickData, spec: SymbolInfo) -> Signal:
         is_single_ema_mode = self.params["fast_period"] == self.params["slow_period"]
@@ -54,11 +62,15 @@ class EMACrossoverStrategy(BaseStrategy):
         point = spec.point
         digits = spec.digits
 
-        # Calculate SL / TP distances
+        sym = spec.name.upper()
+        is_dollar_asset = "XAU" in sym or "XAG" in sym or "GOLD" in sym or "BTC" in sym
         use_atr = self.params.get("use_atr_stops", False)
         if use_atr and curr_atr > 0:
             sl_dist = curr_atr * self.params.get("atr_sl_mult", 1.5)
             tp_dist = curr_atr * self.params.get("atr_tp_mult", 2.5)
+        elif is_dollar_asset and self.params.get("sl_dollars") is not None and float(self.params.get("sl_dollars", 0)) > 0:
+            sl_dist = float(self.params["sl_dollars"])
+            tp_dist = float(self.params.get("tp_dollars", self.params["sl_dollars"] * 2.0))
         else:
             sl_pips = self.params.get("sl_pips", self.params.get("fixed_sl_pips", 25.0))
             tp_pips = self.params.get("tp_pips", self.params.get("fixed_tp_pips", 50.0))

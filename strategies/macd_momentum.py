@@ -37,8 +37,14 @@ class MACDMomentumStrategy(BaseStrategy):
 
         point = spec.point
         digits = spec.digits
-        sl_dist = spec.pip_to_price(self.params["sl_pips"])
-        tp_dist = spec.pip_to_price(self.params["tp_pips"])
+        sym = spec.name.upper()
+        is_dollar_asset = "XAU" in sym or "XAG" in sym or "GOLD" in sym or "BTC" in sym
+        if is_dollar_asset and self.params.get("sl_dollars") is not None and float(self.params.get("sl_dollars", 0)) > 0:
+            sl_dist = float(self.params["sl_dollars"])
+            tp_dist = float(self.params.get("tp_dollars", self.params["sl_dollars"] * 2.0))
+        else:
+            sl_dist = spec.pip_to_price(self.params.get("sl_pips", 25.0))
+            tp_dist = spec.pip_to_price(self.params.get("tp_pips", 50.0))
         sl_points = sl_dist / point
 
         # Bullish MACD cross

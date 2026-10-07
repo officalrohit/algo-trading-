@@ -15,7 +15,7 @@ if BASE_DIR not in sys.path:
 from config import AppConfig, load_config, save_config
 from core.client_interface import Position
 from core.mt5_client import MT5_AVAILABLE
-from strategies import AVAILABLE_STRATEGIES
+from strategies import AVAILABLE_STRATEGIES, format_strategy_name
 from backtester.engine import BacktestEngine
 from trading_engine import TradingEngine
 
@@ -105,7 +105,23 @@ with st.sidebar:
         st.rerun()
 
     if engine.config.mode == "live":
-        st.markdown('<div class="badge-live">● LIVE MT5 BROKER</div>', unsafe_allow_html=True)
+        is_conn = engine.client.is_connected()
+        col_badge, col_btn = st.columns([3, 2])
+        with col_badge:
+            if is_conn:
+                st.markdown('<div class="badge-live">● LIVE MT5 CONNECTED</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="badge-paper" style="background: rgba(239,68,68,0.2); border-color: #ef4444; color: #ef4444;">● MT5 DISCONNECTED</div>', unsafe_allow_html=True)
+        with col_btn:
+            if st.button("🔄 Reconnect", use_container_width=True, help="Force reconnect to MetaTrader 5"):
+                with st.spinner("Connecting to MT5..."):
+                    engine.client.disconnect()
+                    ok = engine.client.connect()
+                    if ok:
+                        st.toast("Connected to MT5 successfully!", icon="✅")
+                    else:
+                        st.toast("Failed to connect to MT5. Check terminal.", icon="❌")
+                    st.rerun()
         if not MT5_AVAILABLE:
             st.error("⚠️ MetaTrader5 python library not loaded.")
     else:
@@ -136,18 +152,35 @@ with st.sidebar:
         save_config(engine.config)
 
     # Strategy Selector
-    strat_names = list(AVAILABLE_STRATEGIES.keys())
+    strat_names = [
+        format_strategy_name("Price Cross EMA", engine.config),
+        format_strategy_name("EMA Crossover", engine.config),
+        "RSI + Bollinger Bands",
+        "MACD Momentum",
+        "Donchian Breakout",
+    ]
+    curr_name = engine.config.strategy.name
+    curr_idx = 0
+    if curr_name in strat_names:
+        curr_idx = strat_names.index(curr_name)
+    else:
+        for idx, opt in enumerate(strat_names):
+            if ("price cross" in curr_name.lower() and "price cross" in opt.lower()) or \
+               ("crossover" in curr_name.lower() and "crossover" in opt.lower()) or \
+               (curr_name.lower() in opt.lower()):
+                curr_idx = idx
+                break
+
     selected_strat_name = st.selectbox(
         "Active Strategy",
         options=strat_names,
-        index=strat_names.index(engine.config.strategy.name)
-        if engine.config.strategy.name in strat_names
-        else 0,
+        index=curr_idx,
     )
     if selected_strat_name != engine.config.strategy.name:
         engine.config.strategy.name = selected_strat_name
         save_config(engine.config)
         engine.update_config(engine.config)
+        st.rerun()
 
     st.markdown("---")
 
@@ -236,16 +269,44 @@ tab_terminal, tab_positions, tab_strategy, tab_risk, tab_backtest, tab_logs = st
 # TAB 1: LIVE TERMINAL
 # =========================================================================
 with tab_terminal:
-    @st.fragment(run_every=refresh_rate)
-    def render_live_terminal():
-        tick = engine.client.get_tick(engine.config.active_symbol)
-        open_positions = engine.client.get_open_positions()
+    col_chart, col_orderpad = st.columns([3, 1])
 
-        col_chart, col_orderpad = st.columns([3, 1])
+    with col_chart:
+        # 1. LIVE PRICE BAR (Auto-refreshes every 1s without touching the chart)
+        @st.fragment(run_every=refresh_rate)
+        def render_live_ticker_header():
+            tick = engine.client.get_tick(engine.config.active_symbol)
+            bid_str = f"{tick.bid:.2f}" if tick else "N/A"
+            ask_str = f"{tick.ask:.2f}" if tick else "N/A"
+            spread_str = f"{tick.spread_points}" if tick else "N/A"
+            st.markdown(
+                f"""
+                <div style="background: #1e222d; padding: 7px 14px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #2a2e39; margin-bottom: 6px;">
+                    <div><b>{engine.config.active_symbol}</b> <span style="color: #888;">({engine.config.active_timeframe})</span></div>
+                    <div>🔴 BID: <b style="color: #f23645;">{bid_str}</b> &nbsp;&nbsp;|&nbsp;&nbsp; 🟢 ASK: <b style="color: #089981;">{ask_str}</b> &nbsp;&nbsp;|&nbsp;&nbsp; Spread: <b>{spread_str} pts</b></div>
+                    <div style="font-size: 0.8em; color: #089981;">⚡ Price Auto-Refreshing</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        with col_chart:
+        render_live_ticker_header()
+
+        # 2. CANDLESTICK CHART (Auto-refreshes every 1s - Zoom & Pan strictly preserved)
+        @st.fragment(run_every=refresh_rate)
+        def render_candlestick_chart():
+            uirev_id = f"{engine.config.active_symbol}_{engine.config.active_timeframe}"
+            c_info, c_btn = st.columns([4, 1])
+            with c_info:
+                st.caption(f"⚡ Live Candlestick Auto-Refresh ({engine.config.active_symbol} {engine.config.active_timeframe}) • Zoom & Pan are preserved • Double-click chart to reset zoom")
+            with c_btn:
+                if st.button("🔄 Refresh Now", use_container_width=True, key="btn_refresh_chart"):
+                    st.rerun(scope="fragment")
+
             # Fetch rates
             rates_df = engine.client.get_rates(engine.config.active_symbol, engine.config.active_timeframe, count=250)
+            open_positions = engine.client.get_open_positions()
+
             if not rates_df.empty:
                 fig = make_subplots(
                     rows=2, cols=1, shared_xaxes=True,
@@ -308,39 +369,60 @@ with tab_terminal:
                     vol_colors = ["#089981" if c >= o else "#f23645" for c, o in zip(rates_df["close"], rates_df["open"])]
                     fig.add_trace(go.Bar(x=rates_df.index, y=rates_df[vol_col], marker_color=vol_colors, name="Volume"), row=2, col=1)
 
-                bid_str = f"{tick.bid:.2f}" if tick else "N/A"
-                ask_str = f"{tick.ask:.2f}" if tick else "N/A"
                 fig.update_layout(
-                    title=f"{engine.config.active_symbol} ({engine.config.active_timeframe}) | 🔴 BID: {bid_str} | 🟢 ASK: {ask_str}",
+                    title=f"{engine.config.active_symbol} ({engine.config.active_timeframe})",
                     xaxis_rangeslider_visible=False,
+                    uirevision=uirev_id,
                     height=560,
                     margin=dict(l=10, r=10, t=40, b=10),
                     template="plotly_dark",
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                fig.update_xaxes(uirevision=uirev_id, rangeslider_visible=False)
+                fig.update_yaxes(uirevision=uirev_id)
+                st.plotly_chart(fig, use_container_width=True, key=f"plotly_chart_{uirev_id}")
             else:
-                st.info("Loading chart data... Check connection settings.")
+                if not engine.client.is_connected():
+                    st.warning("⚠️ **MetaTrader 5 is not connected.** Please verify your MT5 terminal is open and click **'🔄 Reconnect'** in the sidebar.")
+                else:
+                    st.info(f"⏳ **Loading candlestick data for {engine.config.active_symbol} ({engine.config.active_timeframe})...** If this persists, ensure {engine.config.active_symbol} is in MT5 Market Watch.")
+                if st.button("🔄 Reload Chart", key="retry_chart_load"):
+                    st.rerun(scope="fragment")
 
-        with col_orderpad:
+        render_candlestick_chart()
+
+    with col_orderpad:
+        # 3. LIVE ORDER PAD & SIGNAL (Auto-refreshes every 1s)
+        @st.fragment(run_every=refresh_rate)
+        def render_live_orderpad():
             st.subheader("Manual Quick Order")
             spec = engine.client.get_symbol_info(engine.config.active_symbol)
+            tick = engine.client.get_tick(engine.config.active_symbol)
             min_lot = spec.min_lot if spec else 0.01
             max_lot = spec.max_lot if spec else 10.0
             step_lot = spec.lot_step if spec else 0.01
 
+            default_sl = float(getattr(engine.config.strategy, "sl_dollars", 10.0))
+            default_tp = float(getattr(engine.config.strategy, "tp_dollars", 20.0))
             order_lots = st.number_input("Lots", min_value=min_lot, max_value=max_lot, value=min_lot, step=step_lot, key="order_lots_in")
-            order_sl_pips = st.number_input("Stop Loss (pips)", min_value=0.0, value=25.0, step=5.0, key="order_sl_in")
-            order_tp_pips = st.number_input("Take Profit (pips)", min_value=0.0, value=50.0, step=5.0, key="order_tp_in")
+            order_sl_dollars = st.number_input("Stop Loss ($)", min_value=0.0, value=default_sl, step=0.5, key="order_sl_in")
+            order_tp_dollars = st.number_input("Take Profit ($)", min_value=0.0, value=default_tp, step=0.5, key="order_tp_in")
+
+            if spec and (order_sl_dollars > 0 or order_tp_dollars > 0):
+                calc_sl = spec.cash_to_price_dist(order_sl_dollars, order_lots) if order_sl_dollars > 0 else 0.0
+                calc_tp = spec.cash_to_price_dist(order_tp_dollars, order_lots) if order_tp_dollars > 0 else 0.0
+                st.caption(f"💡 Cash SL: **${order_sl_dollars:.2f}** (`{calc_sl:.2f}` pts) | TP: **${order_tp_dollars:.2f}** (`{calc_tp:.2f}` pts)")
 
             # Quotes display
             if tick and spec:
-                st.markdown(f"**Live Ask**: `{tick.ask}` | **Live Bid**: `{tick.bid}`")
+                st.markdown(f"**Live Ask**: `{tick.ask:.2f}` | **Live Bid**: `{tick.bid:.2f}`")
                 st.markdown(f"**Spread**: `{tick.spread_points}` points")
                 col_buy, col_sell = st.columns(2)
                 with col_buy:
                     if st.button("🟢 BUY (Ask)", use_container_width=True, type="primary", key="btn_quick_buy"):
-                        sl_p = round(tick.ask - spec.pip_to_price(order_sl_pips), spec.digits) if order_sl_pips > 0 else None
-                        tp_p = round(tick.ask + spec.pip_to_price(order_tp_pips), spec.digits) if order_tp_pips > 0 else None
+                        sl_dist = spec.cash_to_price_dist(order_sl_dollars, order_lots) if order_sl_dollars > 0 else 0.0
+                        tp_dist = spec.cash_to_price_dist(order_tp_dollars, order_lots) if order_tp_dollars > 0 else 0.0
+                        sl_p = round(tick.ask - sl_dist, spec.digits) if sl_dist > 0 else None
+                        tp_p = round(tick.ask + tp_dist, spec.digits) if tp_dist > 0 else None
                         res = engine.place_manual_order(engine.config.active_symbol, "BUY", order_lots, sl_p, tp_p)
                         if res.success:
                             st.success(f"BUY order executed #{res.order}")
@@ -350,8 +432,10 @@ with tab_terminal:
 
                 with col_sell:
                     if st.button("🔴 SELL (Bid)", use_container_width=True, key="btn_quick_sell"):
-                        sl_p = round(tick.bid + spec.pip_to_price(order_sl_pips), spec.digits) if order_sl_pips > 0 else None
-                        tp_p = round(tick.bid - spec.pip_to_price(order_tp_pips), spec.digits) if order_tp_pips > 0 else None
+                        sl_dist = spec.cash_to_price_dist(order_sl_dollars, order_lots) if order_sl_dollars > 0 else 0.0
+                        tp_dist = spec.cash_to_price_dist(order_tp_dollars, order_lots) if order_tp_dollars > 0 else 0.0
+                        sl_p = round(tick.bid + sl_dist, spec.digits) if sl_dist > 0 else None
+                        tp_p = round(tick.bid - tp_dist, spec.digits) if tp_dist > 0 else None
                         res = engine.place_manual_order(engine.config.active_symbol, "SELL", order_lots, sl_p, tp_p)
                         if res.success:
                             st.success(f"SELL order executed #{res.order}")
@@ -372,7 +456,7 @@ with tab_terminal:
             else:
                 st.caption("No signals evaluated yet. Start bot or select symbol.")
 
-    render_live_terminal()
+        render_live_orderpad()
 
 
 # =========================================================================
@@ -408,7 +492,7 @@ with tab_positions:
                 st.write("")
                 st.write("")
                 if st.button("Close Position", type="primary", key="btn_close_single"):
-                    res = engine.client.close_position(sel_ticket)
+                    res = engine.client.close_position(sel_ticket, comment="Manual UI")
                     if res.success:
                         st.success(f"Position #{sel_ticket} closed successfully.")
                         st.rerun()
@@ -418,13 +502,41 @@ with tab_positions:
             st.info("No open positions currently.")
 
         st.markdown("---")
-        st.subheader("Closed Deals History")
-        deals = engine.client.get_history_deals(days=7)
-        if deals:
-            deals_df = pd.DataFrame(deals)
-            st.dataframe(deals_df, use_container_width=True)
+        st.subheader("Closed Trades History (Last 7 Days)")
+        trades = engine.client.get_history_deals(days=7)
+        if trades:
+            total_realized_pnl = sum(t.get("profit", 0.0) for t in trades)
+            wins = sum(1 for t in trades if t.get("profit", 0.0) > 0)
+            losses = sum(1 for t in trades if t.get("profit", 0.0) < 0)
+            total_trades = len(trades)
+            win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
+
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("Realized P&L", f"${total_realized_pnl:+,.2f}", delta=f"{total_realized_pnl:+.2f}")
+            col_m2.metric("Win Rate", f"{win_rate:.1f}%")
+            col_m3.metric("Closed Trades", f"{total_trades}")
+            col_m4.metric("Win / Loss Count", f"{wins}W / {losses}L")
+
+            display_rows = []
+            for t in trades:
+                display_rows.append({
+                    "Ticket": t.get("ticket"),
+                    "Symbol": t.get("symbol"),
+                    "Type": t.get("type"),
+                    "Lots": t.get("volume"),
+                    "Open Time": t.get("open_time", "-"),
+                    "Open Price": t.get("open_price", "-"),
+                    "Close Time": t.get("close_time", "-"),
+                    "Close Price": t.get("close_price", "-"),
+                    "Stop Loss": t.get("sl", 0.0),
+                    "Take Profit": t.get("tp", 0.0),
+                    "Profit ($)": f"{t.get('profit', 0.0):+,.2f}",
+                    "Exit Reason": t.get("exit_reason", t.get("comment", "-")),
+                })
+            trades_df = pd.DataFrame(display_rows)
+            st.dataframe(trades_df, use_container_width=True)
         else:
-            st.info("No deals recorded yet.")
+            st.info("No closed trades recorded in the past 7 days.")
 
     render_positions_tab()
 
@@ -435,38 +547,100 @@ with tab_positions:
 with tab_strategy:
     st.subheader(f"Strategy Configuration: {engine.config.strategy.name}")
 
+    strat_lower = engine.config.strategy.name.lower()
+    is_price_cross = "price cross" in strat_lower or "single ema" in strat_lower
+    is_ema_crossover = "crossover" in strat_lower
+
     with st.form("strategy_config_form"):
-        col_s1, col_s2 = st.columns(2)
+        if is_price_cross:
+            st.markdown("##### 🎯 Price Cross EMA Settings")
+            cur_ema_val = int(getattr(engine.config.strategy, "ema_period", getattr(engine.config.strategy, "fast_period", 21)))
+            col_pc1, col_pc2 = st.columns(2)
+            with col_pc1:
+                ema_p = st.number_input(
+                    "Price Action EMA Period",
+                    value=cur_ema_val,
+                    min_value=2,
+                    max_value=500,
+                    step=1,
+                    help="EMA period price crosses (e.g. 21, 44, 50, 200). Changing this dynamically updates the strategy name.",
+                )
+            with col_pc2:
+                trend_p = st.number_input(
+                    "Trend Filter EMA Period",
+                    value=int(engine.config.strategy.trend_filter_period),
+                    min_value=20,
+                    max_value=1000,
+                    step=10,
+                    help="Optional higher-timeframe trend filter (e.g. 200 EMA).",
+                )
+            use_trend = st.checkbox(
+                "Enable Trend Filter (Only BUY above trend EMA, SELL below trend EMA)",
+                value=bool(getattr(engine.config.strategy, "use_trend_filter", False)),
+            )
+            fast_p = int(ema_p)
+            slow_p = int(ema_p)
 
-        with col_s1:
-            fast_p = st.number_input("Fast EMA Period", value=engine.config.strategy.fast_period, min_value=2, max_value=200)
-            slow_p = st.number_input("Slow EMA Period", value=engine.config.strategy.slow_period, min_value=5, max_value=500)
-            trend_p = st.number_input("Trend Filter EMA Period", value=engine.config.strategy.trend_filter_period, min_value=20, max_value=1000)
-            rsi_p = st.number_input("RSI Period", value=engine.config.strategy.rsi_period, min_value=2, max_value=100)
-            rsi_os = st.slider("RSI Oversold Level", min_value=10.0, max_value=45.0, value=float(engine.config.strategy.rsi_oversold))
-            rsi_ob = st.slider("RSI Overbought Level", min_value=55.0, max_value=90.0, value=float(engine.config.strategy.rsi_overbought))
+        elif is_ema_crossover:
+            st.markdown("##### ⚡ Dual EMA Crossover Settings")
+            col_cr1, col_cr2, col_cr3 = st.columns(3)
+            with col_cr1:
+                fast_p = st.number_input("Fast EMA Period", value=int(engine.config.strategy.fast_period), min_value=2, max_value=200)
+            with col_cr2:
+                slow_p = st.number_input("Slow EMA Period", value=int(engine.config.strategy.slow_period), min_value=5, max_value=500)
+            with col_cr3:
+                trend_p = st.number_input("Trend Filter EMA Period", value=int(engine.config.strategy.trend_filter_period), min_value=20, max_value=1000)
+            use_trend = st.checkbox("Enable Higher-Timeframe Trend Filter", value=bool(getattr(engine.config.strategy, "use_trend_filter", True)))
+            ema_p = int(fast_p)
 
-        with col_s2:
-            bb_p = st.number_input("Bollinger Bands Period", value=engine.config.strategy.bb_period, min_value=5, max_value=100)
-            bb_std_val = st.number_input("Bollinger Bands Std Dev", value=float(engine.config.strategy.bb_std), min_value=1.0, max_value=4.0, step=0.1)
-            macd_f = st.number_input("MACD Fast", value=engine.config.strategy.macd_fast, min_value=2, max_value=50)
-            macd_s = st.number_input("MACD Slow", value=engine.config.strategy.macd_slow, min_value=10, max_value=100)
-            macd_sig = st.number_input("MACD Signal", value=engine.config.strategy.macd_signal, min_value=2, max_value=50)
-            donch_p = st.number_input("Donchian Period", value=engine.config.strategy.donchian_period, min_value=5, max_value=100)
+        else:
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                fast_p = st.number_input("Fast EMA Period", value=int(engine.config.strategy.fast_period), min_value=2, max_value=200)
+                slow_p = st.number_input("Slow EMA Period", value=int(engine.config.strategy.slow_period), min_value=5, max_value=500)
+                trend_p = st.number_input("Trend Filter EMA Period", value=int(engine.config.strategy.trend_filter_period), min_value=20, max_value=1000)
+                use_trend = bool(getattr(engine.config.strategy, "use_trend_filter", False))
+                ema_p = int(getattr(engine.config.strategy, "ema_period", fast_p))
+            with col_s2:
+                pass
 
-        st.markdown("##### Stop Loss & Target Settings")
+        with st.expander("📊 Secondary Technical Indicators (RSI, Bollinger, MACD, Donchian)", expanded=not (is_price_cross or is_ema_crossover)):
+            col_ind1, col_ind2 = st.columns(2)
+            with col_ind1:
+                rsi_p = st.number_input("RSI Period", value=int(engine.config.strategy.rsi_period), min_value=2, max_value=100)
+                rsi_os = st.slider("RSI Oversold Level", min_value=10.0, max_value=45.0, value=float(engine.config.strategy.rsi_oversold))
+                rsi_ob = st.slider("RSI Overbought Level", min_value=55.0, max_value=90.0, value=float(engine.config.strategy.rsi_overbought))
+                bb_p = st.number_input("Bollinger Bands Period", value=int(engine.config.strategy.bb_period), min_value=5, max_value=100)
+                bb_std_val = st.number_input("Bollinger Bands Std Dev", value=float(engine.config.strategy.bb_std), min_value=1.0, max_value=4.0, step=0.1)
+            with col_ind2:
+                macd_f = st.number_input("MACD Fast", value=int(engine.config.strategy.macd_fast), min_value=2, max_value=50)
+                macd_s = st.number_input("MACD Slow", value=int(engine.config.strategy.macd_slow), min_value=10, max_value=100)
+                macd_sig = st.number_input("MACD Signal", value=int(engine.config.strategy.macd_signal), min_value=2, max_value=50)
+                donch_p = st.number_input("Donchian Period", value=int(engine.config.strategy.donchian_period), min_value=5, max_value=100)
+
+        st.markdown("##### 💰 Stop Loss & Target Settings")
         col_t1, col_t2, col_t3 = st.columns(3)
         with col_t1:
-            sl_pips_in = st.number_input("Stop Loss (pips)", value=float(engine.config.strategy.sl_pips), min_value=1.0, max_value=500.0)
+            sl_dollars_in = st.number_input("Stop Loss ($)", value=float(getattr(engine.config.strategy, "sl_dollars", 10.0)), min_value=0.1, max_value=1000.0, step=0.5, help="Stop loss distance in dollars (e.g. $10.00 cash risk)")
+            if is_price_cross or is_ema_crossover:
+                spec_info = engine.client.get_symbol_info(engine.config.active_symbol)
+                if spec_info:
+                    sl_calc_pts = spec_info.cash_to_price_dist(sl_dollars_in, engine.config.risk.fixed_lot)
+                    st.caption(f"Risk: **${sl_dollars_in:.2f}** (`{sl_calc_pts:.2f}` price pts)")
         with col_t2:
-            tp_pips_in = st.number_input("Take Profit (pips)", value=float(engine.config.strategy.tp_pips), min_value=1.0, max_value=1000.0)
+            tp_dollars_in = st.number_input("Take Profit ($)", value=float(getattr(engine.config.strategy, "tp_dollars", 20.0)), min_value=0.1, max_value=2000.0, step=0.5, help="Target distance in dollars (e.g. $20.00 cash profit)")
+            if is_price_cross or is_ema_crossover:
+                spec_info = engine.client.get_symbol_info(engine.config.active_symbol)
+                if spec_info:
+                    tp_calc_pts = spec_info.cash_to_price_dist(tp_dollars_in, engine.config.risk.fixed_lot)
+                    st.caption(f"Target: **${tp_dollars_in:.2f}** (`{tp_calc_pts:.2f}` price pts)")
         with col_t3:
             magic_in = st.number_input("Strategy Magic Number", value=int(engine.config.strategy.magic_number), min_value=1000)
 
         use_atr_in = st.checkbox(
             "Use ATR Volatility Stops (Dynamic based on 14-candle market volatility)",
             value=bool(getattr(engine.config.strategy, "use_atr_stops", False)),
-            help="If checked, SL and TP adjust automatically to market volatility using ATR. If unchecked, exact Fixed Pips above are used.",
+            help="If checked, SL and TP adjust automatically to market volatility using ATR. If unchecked, exact Dollars ($) above are used.",
         )
         col_atr1, col_atr2 = st.columns(2)
         with col_atr1:
@@ -475,9 +649,11 @@ with tab_strategy:
             atr_tp_in = st.number_input("ATR TP Multiplier", value=float(getattr(engine.config.strategy, "atr_tp_mult", 2.5)), min_value=0.5, max_value=10.0, step=0.1)
 
         if st.form_submit_button("💾 Save Strategy Settings", type="primary"):
+            engine.config.strategy.ema_period = int(ema_p)
             engine.config.strategy.fast_period = int(fast_p)
             engine.config.strategy.slow_period = int(slow_p)
             engine.config.strategy.trend_filter_period = int(trend_p)
+            engine.config.strategy.use_trend_filter = bool(use_trend)
             engine.config.strategy.rsi_period = int(rsi_p)
             engine.config.strategy.rsi_oversold = float(rsi_os)
             engine.config.strategy.rsi_overbought = float(rsi_ob)
@@ -487,16 +663,27 @@ with tab_strategy:
             engine.config.strategy.macd_slow = int(macd_s)
             engine.config.strategy.macd_signal = int(macd_sig)
             engine.config.strategy.donchian_period = int(donch_p)
-            engine.config.strategy.sl_pips = float(sl_pips_in)
-            engine.config.strategy.tp_pips = float(tp_pips_in)
+            engine.config.strategy.sl_dollars = float(sl_dollars_in)
+            engine.config.strategy.tp_dollars = float(tp_dollars_in)
+            engine.config.strategy.sl_pips = float(sl_dollars_in * 100.0)
+            engine.config.strategy.tp_pips = float(tp_dollars_in * 100.0)
             engine.config.strategy.use_atr_stops = bool(use_atr_in)
             engine.config.strategy.atr_sl_mult = float(atr_sl_in)
             engine.config.strategy.atr_tp_mult = float(atr_tp_in)
             engine.config.strategy.magic_number = int(magic_in)
 
+            # Update Strategy Name dynamically to reflect EMA period
+            if is_price_cross:
+                engine.config.strategy.name = f"Price Cross EMA ({ema_p} EMA)"
+            elif is_ema_crossover:
+                engine.config.strategy.name = f"EMA Crossover ({fast_p}/{slow_p} EMA)"
+
+            # Save updated configuration
+
             save_config(engine.config)
             engine.update_config(engine.config)
-            st.success("Strategy settings successfully saved and applied to active bot!")
+            st.success(f"Strategy settings successfully saved! Active Strategy: **{engine.config.strategy.name}** | Stop Loss: ${sl_dollars_in:.2f} | Take Profit: ${tp_dollars_in:.2f}")
+            st.rerun()
 
 
 # =========================================================================
@@ -518,7 +705,7 @@ with tab_risk:
             daily_loss = st.number_input("Circuit Breaker: Max Daily Loss ($)", min_value=10.0, max_value=10000.0, value=float(engine.config.risk.max_daily_loss), step=50.0)
             max_spread = st.number_input("Max Spread Filter (points)", min_value=5, max_value=100, value=int(engine.config.risk.max_spread_points))
             use_ts = st.checkbox("Enable Trailing Stop Loss", value=engine.config.risk.use_trailing_stop)
-            ts_pips = st.number_input("Trailing Stop Distance (pips)", min_value=5.0, max_value=100.0, value=float(engine.config.risk.trailing_stop_pips))
+            ts_dollars = st.number_input("Trailing Stop Distance ($)", min_value=0.1, max_value=100.0, value=float(getattr(engine.config.risk, "trailing_stop_dollars", 1.0)), step=0.5)
 
         if st.form_submit_button("💾 Save Risk Settings", type="primary"):
             engine.config.risk.max_risk_pct = float(max_risk)
@@ -528,7 +715,8 @@ with tab_risk:
             engine.config.risk.max_daily_loss = float(daily_loss)
             engine.config.risk.max_spread_points = int(max_spread)
             engine.config.risk.use_trailing_stop = use_ts
-            engine.config.risk.trailing_stop_pips = float(ts_pips)
+            engine.config.risk.trailing_stop_dollars = float(ts_dollars)
+            engine.config.risk.trailing_stop_pips = float(ts_dollars * 100.0)
 
             save_config(engine.config)
             engine.update_config(engine.config)
@@ -541,28 +729,158 @@ with tab_risk:
 with tab_backtest:
     st.subheader("Historical Quantitative Strategy Backtester")
 
-    col_bt1, col_bt2, col_bt3, col_bt4 = st.columns(4)
-    with col_bt1:
-        bt_sym = st.selectbox("Backtest Symbol", options=engine.config.tracked_symbols, index=0)
-    with col_bt2:
-        bt_strat_name = st.selectbox("Strategy to Backtest", options=list(AVAILABLE_STRATEGIES.keys()))
-    with col_bt3:
-        bt_capital = st.number_input("Starting Capital ($)", value=10000.0, step=1000.0)
-    with col_bt4:
-        bt_bars = st.slider("Historical Bars", min_value=100, max_value=500, value=250, step=50)
+    row1_c1, row1_c2, row1_c3, row1_c4 = st.columns(4)
+    with row1_c1:
+        bt_sym = st.selectbox(
+            "Backtest Symbol",
+            options=engine.config.tracked_symbols,
+            index=engine.config.tracked_symbols.index(engine.config.active_symbol)
+            if engine.config.active_symbol in engine.config.tracked_symbols
+            else 0,
+            key="bt_sym_select",
+        )
+    with row1_c2:
+        bt_tf = st.selectbox(
+            "Timeframe",
+            options=timeframe_options,
+            index=timeframe_options.index(engine.config.active_timeframe)
+            if engine.config.active_timeframe in timeframe_options
+            else 1,
+            key="bt_tf_select",
+        )
+    with row1_c3:
+        bt_strat_options = [
+            format_strategy_name("Price Cross EMA", engine.config),
+            format_strategy_name("EMA Crossover", engine.config),
+            "RSI + Bollinger Bands",
+            "MACD Momentum",
+            "Donchian Breakout",
+        ]
+        bt_idx = 0
+        if engine.config.strategy.name in bt_strat_options:
+            bt_idx = bt_strat_options.index(engine.config.strategy.name)
+        else:
+            for idx, opt in enumerate(bt_strat_options):
+                if ("price cross" in engine.config.strategy.name.lower() and "price cross" in opt.lower()) or \
+                   ("crossover" in engine.config.strategy.name.lower() and "crossover" in opt.lower()):
+                    bt_idx = idx
+                    break
 
-    if st.button("🧪 Run Backtest", type="primary"):
-        with st.spinner("Executing simulation backtest..."):
-            hist_df = engine.client.get_rates(bt_sym, "M5", count=bt_bars)
+        bt_strat_name = st.selectbox(
+            "Strategy to Backtest",
+            options=bt_strat_options,
+            index=bt_idx,
+            key="bt_strat_select",
+        )
+    with row1_c4:
+        bt_qty = st.number_input(
+            "Order Quantity (Lots)",
+            min_value=0.01,
+            max_value=50.0,
+            value=float(engine.config.risk.fixed_lot or 0.01),
+            step=0.01,
+            key="bt_qty_input",
+            help="Position size per trade in lots (e.g. 0.01 lots)",
+        )
+
+    row2_c1, row2_c2, row2_c3, row2_c4 = st.columns(4)
+    with row2_c1:
+        bt_sl_dollars = st.number_input(
+            "Stop Loss ($)",
+            min_value=0.1,
+            max_value=1000.0,
+            value=float(getattr(engine.config.strategy, "sl_dollars", 10.0)),
+            step=0.5,
+            key="bt_sl_dollars_in",
+            help="Cash Stop Loss amount in dollars (e.g. $10.00 cash risk per trade)",
+        )
+    with row2_c2:
+        bt_tp_dollars = st.number_input(
+            "Take Profit / Target ($)",
+            min_value=0.1,
+            max_value=2000.0,
+            value=float(getattr(engine.config.strategy, "tp_dollars", 20.0)),
+            step=0.5,
+            key="bt_tp_dollars_in",
+            help="Cash Target profit in dollars (e.g. $20.00 cash profit per trade)",
+        )
+    with row2_c3:
+        bt_capital = st.number_input(
+            "Starting Capital ($)",
+            value=10000.0,
+            step=1000.0,
+            key="bt_capital_input",
+        )
+    with row2_c4:
+        bt_bars = st.slider(
+            "Historical Bars",
+            min_value=100,
+            max_value=1000,
+            value=250,
+            step=50,
+            key="bt_bars_input",
+        )
+
+    # Dynamic Cash Dollar Calculation Guidance
+    preview_spec = engine.client.get_symbol_info(bt_sym)
+    if preview_spec is None:
+        digits = 2 if ("XAU" in bt_sym.upper() or "JPY" in bt_sym.upper() or "GOLD" in bt_sym.upper()) else 5
+        point = 0.01 if digits == 2 else 0.00001
+        preview_spec = SymbolInfo(name=bt_sym, digits=digits, point=point, spread=30, min_lot=0.01, max_lot=100.0, lot_step=0.01)
+
+    c_prev_sl = preview_spec.cash_to_price_dist(bt_sl_dollars, bt_qty)
+    c_prev_tp = preview_spec.cash_to_price_dist(bt_tp_dollars, bt_qty)
+
+    row3_c1, row3_c2 = st.columns([3, 2])
+    with row3_c1:
+        st.caption(
+            f"💡 **Cash Alignment**: For **{bt_qty} lots** on **{bt_sym}**, "
+            f"**${bt_sl_dollars:.2f} SL** = `{c_prev_sl:.2f}` price move | "
+            f"**${bt_tp_dollars:.2f} Target** = `{c_prev_tp:.2f}` price move."
+        )
+    with row3_c2:
+        bt_exit_opposite = st.checkbox(
+            "Exit & Reverse on Opposite Strategy Signal",
+            value=True,
+            help="If checked, an active BUY will exit if a confirmed SELL crossover occurs before SL/TP (and vice versa).",
+        )
+
+    if st.button("🧪 Run Backtest", type="primary", use_container_width=True):
+        with st.spinner(f"Executing simulation backtest for {bt_sym} ({bt_tf}) with {bt_qty} lots..."):
+            hist_df = engine.client.get_rates(bt_sym, bt_tf, count=bt_bars)
             spec = engine.client.get_symbol_info(bt_sym)
+            if spec is None:
+                digits = 2 if ("XAU" in bt_sym.upper() or "JPY" in bt_sym.upper() or "GOLD" in bt_sym.upper()) else 5
+                point = 0.01 if digits == 2 else 0.00001
+                spec = SymbolInfo(
+                    name=bt_sym,
+                    digits=digits,
+                    point=point,
+                    spread=30,
+                    min_lot=0.01,
+                    max_lot=100.0,
+                    lot_step=0.01,
+                )
+
+            # Convert exact cash dollars to instrument price distance based on position volume
+            sl_price_dist = spec.cash_to_price_dist(float(bt_sl_dollars), float(bt_qty))
+            tp_price_dist = spec.cash_to_price_dist(float(bt_tp_dollars), float(bt_qty))
+
             strat_cls = AVAILABLE_STRATEGIES[bt_strat_name]
-            strat_instance = strat_cls(engine.config.strategy.model_dump())
+            strat_params = engine.config.strategy.model_dump()
+            strat_params["sl_dollars"] = float(sl_price_dist)
+            strat_params["tp_dollars"] = float(tp_price_dist)
+            strat_params["sl_pips"] = float(sl_price_dist / spec.point)
+            strat_params["tp_pips"] = float(tp_price_dist / spec.point)
+            strat_instance = strat_cls(strat_params)
 
             bt_engine = BacktestEngine(
                 strategy=strat_instance,
                 symbol_info=spec,
                 initial_capital=bt_capital,
                 risk_pct=engine.config.risk.max_risk_pct,
+                fixed_lot=bt_qty,
+                exit_on_opposite=bt_exit_opposite,
             )
             result = bt_engine.run(hist_df)
 

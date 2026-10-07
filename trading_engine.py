@@ -57,11 +57,19 @@ class TradingEngine:
 
     def update_config(self, new_config: AppConfig) -> None:
         with self._lock:
-            mode_changed = self.config.mode != new_config.mode
-            strat_changed = self.config.strategy.name != new_config.strategy.name
+            is_live_client = isinstance(self.client, MT5Client)
+            target_is_live = new_config.mode.lower() == "live"
+            mode_changed = is_live_client != target_is_live
             mt5_changed = self.config.mt5.model_dump() != new_config.mt5.model_dump()
+
             self.config = new_config
             self.risk_manager.update_config(new_config.risk)
+
+            # ALWAYS recreate strategy with updated parameters so SL/TP take effect immediately
+            self.strategy = self._create_strategy()
+            sl_val = getattr(new_config.strategy, "sl_dollars", getattr(new_config.strategy, "sl_pips", "N/A"))
+            tp_val = getattr(new_config.strategy, "tp_dollars", getattr(new_config.strategy, "tp_pips", "N/A"))
+            self._log(f"Strategy updated: {self.config.strategy.name} (SL: ${sl_val}, TP: ${tp_val})", "INFO")
 
             if mode_changed or mt5_changed:
                 was_running = self.is_running
@@ -73,10 +81,6 @@ class TradingEngine:
                 if was_running:
                     self.start()
                 self._log(f"Client reconnected for {new_config.mode.upper()} mode", "INFO")
-
-            if strat_changed:
-                self.strategy = self._create_strategy()
-                self._log(f"Switched strategy to {new_config.strategy.name}", "INFO")
 
     def _log(self, message: str, level: str = "INFO") -> None:
         entry = {
@@ -189,11 +193,32 @@ class TradingEngine:
                 return
 
             # Position Sizing
-            sl_points = sig.sl_points if sig.sl_points > 0 else (self.config.strategy.sl_pips * 10)
+            if sig.sl_points > 0:
+                sl_points = sig.sl_points
+            elif hasattr(self.config.strategy, "sl_dollars") and float(getattr(self.config.strategy, "sl_dollars", 0)) > 0:
+                sl_points = float(self.config.strategy.sl_dollars) / sym_info.point
+            else:
+                sl_points = sym_info.pip_to_price(self.config.strategy.sl_pips) / sym_info.point
             lot_size = self.risk_manager.calculate_lot_size(account, sym_info, sl_points)
 
+            # Adjust SL and TP price levels to match exact cash dollars for this lot size
+            sl_price = sig.sl_price
+            tp_price = sig.tp_price
+            use_atr = bool(getattr(self.config.strategy, "use_atr_stops", False))
+            sl_cash = float(getattr(self.config.strategy, "sl_dollars", 0.0))
+            tp_cash = float(getattr(self.config.strategy, "tp_dollars", 0.0))
+            if not use_atr and sl_cash > 0:
+                sl_dist = sym_info.cash_to_price_dist(sl_cash, lot_size)
+                tp_dist = sym_info.cash_to_price_dist(tp_cash, lot_size) if tp_cash > 0 else 0.0
+                if sig.signal_type == "BUY":
+                    sl_price = round(tick.ask - sl_dist, sym_info.digits)
+                    tp_price = round(tick.ask + tp_dist, sym_info.digits) if tp_dist > 0 else None
+                elif sig.signal_type == "SELL":
+                    sl_price = round(tick.bid + sl_dist, sym_info.digits)
+                    tp_price = round(tick.bid - tp_dist, sym_info.digits) if tp_dist > 0 else None
+
             self._log(
-                f"Executing {sig.signal_type} {lot_size} lots on {symbol} (SL: {sig.sl_price}, TP: {sig.tp_price}) - Reason: {sig.reason}",
+                f"Executing {sig.signal_type} {lot_size} lots on {symbol} (SL: {sl_price}, TP: {tp_price}) - Reason: {sig.reason}",
                 "INFO",
             )
 
@@ -201,8 +226,8 @@ class TradingEngine:
                 symbol=symbol,
                 order_type=sig.signal_type,
                 volume=lot_size,
-                sl=sig.sl_price,
-                tp=sig.tp_price,
+                sl=sl_price,
+                tp=tp_price,
                 magic=self.config.strategy.magic_number,
                 comment=f"Bot:{self.config.strategy.name[:12]}",
             )

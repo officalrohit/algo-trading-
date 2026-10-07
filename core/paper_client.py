@@ -34,8 +34,8 @@ SYMBOL_SPECS = {
     "USDCAD": SymbolInfo("USDCAD", 5, 0.00001, 18, 0.01, 100.0, 0.01),
     "USDCHF": SymbolInfo("USDCHF", 5, 0.00001, 15, 0.01, 100.0, 0.01),
     "NZDUSD": SymbolInfo("NZDUSD", 5, 0.00001, 20, 0.01, 100.0, 0.01),
-    "XAUUSD": SymbolInfo("XAUUSD", 2, 0.01, 25, 0.01, 50.0, 0.01),
-    "BTCUSD": SymbolInfo("BTCUSD", 2, 0.01, 150, 0.01, 20.0, 0.01),
+    "XAUUSD": SymbolInfo("XAUUSD", 2, 0.01, 25, 0.01, 50.0, 0.01, contract_size=100.0),
+    "BTCUSD": SymbolInfo("BTCUSD", 2, 0.01, 150, 0.01, 20.0, 0.01, contract_size=1.0),
 }
 
 
@@ -183,17 +183,26 @@ class PaperTradingClient(TradingClient):
             profit = (pos.price_open - close_price) * pos.volume * contract_size
 
         self.balance = round(self.balance + profit, 2)
+        open_time_str = pos.time.strftime("%Y-%m-%d %H:%M:%S") if isinstance(pos.time, datetime) else str(pos.time)
+        close_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
         deal = {
             "ticket": pos.ticket,
             "order": pos.ticket,
-            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "time": close_time_str,
             "symbol": pos.symbol,
-            "type": "SELL" if pos.type == "BUY" else "BUY",
+            "type": pos.type,
             "volume": pos.volume,
-            "price": close_price,
+            "open_time": open_time_str,
+            "open_price": pos.price_open,
+            "close_time": close_time_str,
+            "close_price": round(close_price, 5),
+            "sl": pos.sl,
+            "tp": pos.tp,
             "profit": round(profit, 2),
             "commission": 0.0,
             "swap": 0.0,
+            "exit_reason": reason,
             "comment": f"{pos.comment} [{reason}]",
         }
         self.history_deals.append(deal)
@@ -308,7 +317,7 @@ class PaperTradingClient(TradingClient):
             comment="Order Executed",
         )
 
-    def close_position(self, ticket: int) -> OrderResult:
+    def close_position(self, ticket: int, comment: str = "Manual Close") -> OrderResult:
         self._update_market_prices()
         pos = self.positions.get(ticket)
         if not pos:
@@ -316,7 +325,7 @@ class PaperTradingClient(TradingClient):
 
         tick = self.get_tick(pos.symbol)
         close_price = tick.bid if pos.type == "BUY" else tick.ask
-        self._execute_close(pos, close_price, "Manual Close")
+        self._execute_close(pos, close_price, comment)
         self.positions.pop(ticket, None)
         self._evaluate_positions()
 
@@ -327,7 +336,7 @@ class PaperTradingClient(TradingClient):
             deal=ticket,
             volume=pos.volume,
             price=close_price,
-            comment="Closed manually",
+            comment=f"Closed ({comment})",
         )
 
     def modify_position(self, ticket: int, sl: Optional[float] = None, tp: Optional[float] = None) -> OrderResult:
@@ -352,7 +361,7 @@ class PaperTradingClient(TradingClient):
         self._update_market_prices()
         results = []
         for ticket in list(self.positions.keys()):
-            res = self.close_position(ticket)
+            res = self.close_position(ticket, comment="Kill Switch")
             results.append(res)
         return results
 

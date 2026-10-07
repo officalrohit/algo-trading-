@@ -48,14 +48,20 @@ def test_open_and_close_buy_position(paper_client):
     assert paper_client.positions[pos.ticket].sl == 1.07500
 
     # Close Position
-    close_res = paper_client.close_position(pos.ticket)
+    close_res = paper_client.close_position(pos.ticket, comment="Manual UI")
     assert close_res.success
     assert len(paper_client.get_open_positions()) == 0
 
     # Verify History Deal
     deals = paper_client.get_history_deals()
     assert len(deals) >= 1
-    assert deals[0]["ticket"] == pos.ticket
+    deal = deals[0]
+    assert deal["ticket"] == pos.ticket
+    assert "open_price" in deal
+    assert "close_price" in deal
+    assert deal["sl"] == 1.07500
+    assert deal["tp"] == 1.10000
+    assert deal["exit_reason"] == "Manual UI"
 
 
 def test_emergency_close_all(paper_client):
