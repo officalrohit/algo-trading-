@@ -1,7 +1,7 @@
 {
     "mode": "live",
     "active_symbol": "XAUUSD",
-    "active_timeframe": "M15",
+    "active_timeframe": "M5",
     "scan_interval_seconds": 1,
     "mt5": {
         "login": 5057018830,
@@ -19,17 +19,17 @@
         "max_daily_loss": 4000.0,
         "max_spread_points": 60,
         "slippage_points": 10,
-        "use_trailing_stop": false,
+        "use_trailing_stop": true,
         "trailing_stop_dollars": 1.0,
         "trailing_stop_pips": 100.0
     },
     "strategy": {
-        "name": "Price Cross EMA (21 EMA)",
+        "name": "Price Cross EMA (11 EMA)",
         "symbol": "EURUSD",
         "timeframe": "M5",
-        "ema_period": 21,
-        "fast_period": 21,
-        "slow_period": 21,
+        "ema_period": 11,
+        "fast_period": 11,
+        "slow_period": 11,
         "trend_filter_period": 200,
         "use_trend_filter": false,
         "rsi_period": 14,
@@ -48,6 +48,7 @@
         "use_atr_stops": false,
         "atr_sl_mult": 1.5,
         "atr_tp_mult": 2.5,
+        "exit_on_opposite": true,
         "magic_number": 777123
     },
     "tracked_symbols": [

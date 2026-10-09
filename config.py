@@ -56,6 +56,7 @@ class StrategyConfig(BaseModel):
     use_atr_stops: bool = False
     atr_sl_mult: float = 1.5
     atr_tp_mult: float = 2.5
+    exit_on_opposite: bool = True
     magic_number: int = 777123
 
 
@@ -65,6 +66,7 @@ class AppConfig(BaseModel):
     active_symbol: str = "EURUSD"
     active_timeframe: str = "M5"
     scan_interval_seconds: int = 3
+    auto_start_bot: bool = False  # Auto-start trading engine when app boots
     mt5: MT5Config = Field(default_factory=MT5Config)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)

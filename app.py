@@ -81,6 +81,8 @@ def get_engine() -> TradingEngine:
     config = load_config()
     engine = TradingEngine(config)
     engine.client.connect()
+    if getattr(config, "auto_start_bot", False) and not engine.is_running:
+        engine.start()
     return engine
 
 
@@ -201,6 +203,15 @@ with st.sidebar:
             engine.stop()
             st.toast("Bot stopped.", icon="⏸️")
             st.rerun()
+
+    auto_start_val = st.checkbox(
+        "🚀 Auto-Start on Launch",
+        value=bool(getattr(engine.config, "auto_start_bot", False)),
+        help="If checked, the trading bot automatically starts scanning and trading whenever the application starts up, without requiring you to manually click START BOT.",
+    )
+    if auto_start_val != getattr(engine.config, "auto_start_bot", False):
+        engine.config.auto_start_bot = auto_start_val
+        save_config(engine.config)
 
     # Emergency Panic Button
     st.markdown("---")
@@ -648,6 +659,13 @@ with tab_strategy:
         with col_atr2:
             atr_tp_in = st.number_input("ATR TP Multiplier", value=float(getattr(engine.config.strategy, "atr_tp_mult", 2.5)), min_value=0.5, max_value=10.0, step=0.1)
 
+        st.markdown("##### 🔄 Reversal & Exit Options")
+        exit_reverse_in = st.checkbox(
+            "Exit & Reverse on Opposite Strategy Signal",
+            value=bool(getattr(engine.config.strategy, "exit_on_opposite", True)),
+            help="When enabled, if an opposite confirmed signal occurs on candle close (e.g. price closes below EMA while in a BUY trade), the bot automatically closes the BUY trade and immediately opens a new SELL trade on the reverse side.",
+        )
+
         if st.form_submit_button("💾 Save Strategy Settings", type="primary"):
             engine.config.strategy.ema_period = int(ema_p)
             engine.config.strategy.fast_period = int(fast_p)
@@ -670,6 +688,7 @@ with tab_strategy:
             engine.config.strategy.use_atr_stops = bool(use_atr_in)
             engine.config.strategy.atr_sl_mult = float(atr_sl_in)
             engine.config.strategy.atr_tp_mult = float(atr_tp_in)
+            engine.config.strategy.exit_on_opposite = bool(exit_reverse_in)
             engine.config.strategy.magic_number = int(magic_in)
 
             # Update Strategy Name dynamically to reflect EMA period
@@ -682,7 +701,8 @@ with tab_strategy:
 
             save_config(engine.config)
             engine.update_config(engine.config)
-            st.success(f"Strategy settings successfully saved! Active Strategy: **{engine.config.strategy.name}** | Stop Loss: ${sl_dollars_in:.2f} | Take Profit: ${tp_dollars_in:.2f}")
+            rev_status = "Enabled" if exit_reverse_in else "Disabled"
+            st.success(f"Strategy settings successfully saved! Active Strategy: **{engine.config.strategy.name}** | Stop Loss: ${sl_dollars_in:.2f} | Take Profit: ${tp_dollars_in:.2f} | Exit & Reverse: **{rev_status}**")
             st.rerun()
 
 

@@ -462,12 +462,15 @@ class MT5Client(TradingClient):
 
             # Determine human-friendly exit reason
             reason_str = "Closed"
-            if last_out.reason == 4 or "[sl" in (last_out.comment or "").lower():
+            c_low = (last_out.comment or "").lower()
+            if last_out.reason == 4 or "[sl" in c_low:
                 reason_str = "Stop Loss Hit"
-            elif last_out.reason == 5 or "[tp" in (last_out.comment or "").lower():
+            elif last_out.reason == 5 or "[tp" in c_low:
                 reason_str = "Take Profit Hit"
-            elif last_out.reason == 6 or "so" in (last_out.comment or "").lower():
+            elif last_out.reason == 6 or "so" in c_low:
                 reason_str = "Stop Out"
+            elif "exit&reverse" in c_low or "reverse" in c_low or "rev-" in c_low:
+                reason_str = "Exit & Reverse"
             elif last_out.comment:
                 reason_str = last_out.comment
 

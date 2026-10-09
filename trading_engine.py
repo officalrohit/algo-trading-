@@ -69,7 +69,8 @@ class TradingEngine:
             self.strategy = self._create_strategy()
             sl_val = getattr(new_config.strategy, "sl_dollars", getattr(new_config.strategy, "sl_pips", "N/A"))
             tp_val = getattr(new_config.strategy, "tp_dollars", getattr(new_config.strategy, "tp_pips", "N/A"))
-            self._log(f"Strategy updated: {self.config.strategy.name} (SL: ${sl_val}, TP: ${tp_val})", "INFO")
+            rev_val = "Enabled" if getattr(new_config.strategy, "exit_on_opposite", True) else "Disabled"
+            self._log(f"Strategy updated: {self.config.strategy.name} (SL: ${sl_val}, TP: ${tp_val}, Reversal: {rev_val})", "INFO")
 
             if mode_changed or mt5_changed:
                 was_running = self.is_running
@@ -176,10 +177,38 @@ class TradingEngine:
             if hasattr(self, "_last_traded_candle") and self._last_traded_candle == closed_candle_time:
                 return
 
-            # Check if position already open for this symbol and strategy magic
+            # Check existing positions for this symbol and strategy magic
             existing = [p for p in positions if p.symbol == symbol and p.magic == self.config.strategy.magic_number]
-            if existing:
-                return  # Prevent duplicate stacking
+            same_positions = [p for p in existing if p.type == sig.signal_type]
+            opp_positions = [p for p in existing if p.type != sig.signal_type]
+
+            # 1. Prevent duplicate stacking in the same direction
+            if same_positions:
+                return
+
+            # 2. Exit & Reverse on opposite signal
+            exit_on_opp = bool(getattr(self.config.strategy, "exit_on_opposite", True))
+            if opp_positions:
+                if not exit_on_opp:
+                    return  # Feature disabled: keep existing opposite trade
+
+                self._log(
+                    f"🔄 Confirmed opposite {sig.signal_type} signal! Closing {len(opp_positions)} opposite {opp_positions[0].type} position(s) for Exit & Reverse.",
+                    "INFO",
+                )
+                for opp_p in opp_positions:
+                    close_res = self.client.close_position(opp_p.ticket, comment="Exit&Reverse")
+                    if close_res.success:
+                        self._log(f"Closed opposite #{opp_p.ticket} ({opp_p.type}) for Exit & Reverse", "INFO")
+                    else:
+                        self._log(f"Failed to close opposite #{opp_p.ticket}: {close_res.error_message}", "ERROR")
+
+                # Refresh tick, open positions and account balance after closing opposite position
+                tick = self.client.get_tick(symbol) or tick
+                positions = self.client.get_open_positions()
+                account = self.client.get_account_info()
+                if not account:
+                    return
 
             # Risk Checks
             can_trade, risk_msg = self.risk_manager.can_open_position(
